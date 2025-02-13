@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import logging
+import mimetypes
+import os
+import sys
+import time
+from base64 import b64encode
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import autopep8
+import requests
+import yaml
+from dotenv import load_dotenv
+from prompt_toolkit import HTML, PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import FileHistory
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.syntax import Syntax
+from rich.table import Table
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[RichHandler(rich_tracebacks=True)],
+)
+logger = logging.getLogger(__name__)
+
+
+class Config:
+    """Configuration class for the Gemini AI CLI."""
+
+    def __init__(self):
+        """Initialize configuration with default values."""
+        self.api_key: str = os.environ.get("GEMINI_API_KEY", "")
+        self.model_name: str = "gemini-pro"
+        self.system_prompt: str = ""
+        self.temperature: float = 0.9
+        self.top_p: float = 1.0
+        self.max_output_tokens: int = 2048
+        self.history_file: Path = Path("~/.gemini_history").expanduser()  # Default in home dir
+        self.max_history_entries: int = 2048
+        self.history_load_limit: int = 100  # Not currently used, but good to have
+        self.log_level: str = "INFO"  # Not currently used, consider removing
+        self.theme: str = "monokai"
+        self.auto_save: bool = True
+        self.conversation_history: List[Dict[str, str]] = []
+        self.auto_complete: bool = True
+        self.stream: bool = False  # Future enhancement
+        self.timeout: int = 60
+        self.pep8_format: bool = True
+
+    @classmethod
+    def load(cls, path: Path) -> "Config":
+        """Load configuration from a YAML file."""
+        cfg = cls()
+        if path.exists():
+            try:
+                with open(path, "r") as f:
+                    config_data = yaml.safe_load(f)
+                    if config_data:
+                        # Update only if keys exist in the Config class
+                        for key, value in config_data.items():
+                            if hasattr(cfg, key):
+                                 if key == "history_file":
+                                     setattr(cfg, key, Path(value).expanduser())
+                                 else:
+                                     setattr(cfg, key, value)
+
+            except FileNotFoundError:
+                logger.warning(f"Config file not found: {path}. Using defaults.")
+            except yaml.YAMLError as e:
+                logger.error(f"YAML error in config file: {path}. Using defaults. {e}")
+                print(f"[red]Error parsing config file {path}. Using defaults.[/red]")
+            except Exception as e:
+                logger.error(f"Error loading config from {path}. Using defaults. {e}")
+                print(f"[red]Error loading config file {path}. Using defaults.[/red]")
+
+        if not cfg.api_key:
+            cfg.api_key = os.environ.get("GEMINI_API_KEY", "")
+        return cfg
+
+    def save(self, path: Path):
+        """Save configuration to a YAML file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "w") as f:
+                data_to_save = {}
+                # Only save attributes that belong to the Config class
+                for key, value in self.__dict__.items():
+                     if key in Config.__dict__ or key in self.__class__.__dict__:
+                        if key == "api_key":
+                            data_to_save[key] = ""  # Don't save API key
+                        elif key == "history_file":
+                            data_to_save[key] = str(value) # store as string
+                        else:
+                            data_to_save[key] = value
+
+                yaml.dump(data_to_save, f)
+        except Exception as e:
+            logger.error(f"Error saving config to {path}: {e}")
+
+    def truncate_history_file(self):
+        """Truncate the history file to the maximum number of entries."""
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, "r") as f:
+                    lines = f.readlines()
+                if len(lines) > self.max_history_entries:
+                    with open(self.history_file, "w") as f:
+                        f.writelines(lines[-self.max_history_entries:])
+            except Exception as e:
+                logger.error(f"Error truncating history file: {e}")
+
+
+def get_file_content_and_mime(file_path: Path) -> Optional[Dict[str, str]]:
+    """Get file content and MIME type for file uploads."""
+    try:
+        mime_type, _ = mimetypes.guess_type(file_path.name)
+        mime_type = mime_type or "application/octet-stream"
+        with open(file_path, "rb") as f:
+            file_content = b64encode(f.read()).decode("utf-8")
+        return {
+            "mime_type": mime_type,
+            "data": file_content,
+            "file_name": file_path.name,
+        }
+    except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error reading file: {file_path}. {e}")
+        return None
+
+
+def render_rich_output(text: str, theme: str, console: Console) -> List[Any]:
+    """Render text with Rich, handling code blocks and Markdown."""
+    formatted_lines = []
+    is_code_block = False
+    code_buffer = []
+    code_language = ""
+
+    for line in text.splitlines():
+        if line.startswith("```"):
+            if is_code_block:
+                code = "\n".join(code_buffer)
+                if code_language == "python":
+                    try:
+                        code = autopep8.fix_code(code)
+                    except Exception:
+                        console.print("[yellow]PEP8 formatting error.[/yellow]")
+                syntax = Syntax(code, code_language or "text", theme=theme)
+                formatted_lines.append(syntax)
+                code_buffer = []
+                is_code_block = False
+                code_language = ""
+            else:
+                code_language = line[3:].strip()
+                is_code_block = True
+        elif is_code_block:
+            code_buffer.append(line)
+        else:
+            formatted_lines.append(Markdown(line))
+
+    return formatted_lines
+
+
+class GeminiClient:
+    """Client for interacting with the Gemini API."""
+
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+
+    def __init__(self, config: Config):
+        """Initialize the Gemini client."""
+        self.config = config
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+        self.console = Console()
+
+    def make_api_request(
+        self, url: str, params: Dict[str, str], payload: Dict[str, Any]
+    ) -> Optional[Dict]:
+        """Make an API request to the Gemini API."""
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=True,
+            ) as progress:
+                task_id = progress.add_task("[cyan]Generating response...", total=None)
+                response = self.session.post(
+                    url, json=payload, params=params, timeout=self.config.timeout
+                )
+                response.raise_for_status()
+                progress.update(task_id, completed=1)
+                return response.json()
+        except requests.Timeout:
+            self.console.print("[red]Request timeout.[/red]")
+            logger.error("API request timeout", exc_info=True)
+        except requests.ConnectionError:
+            self.console.print("[red]Connection error.[/red]")
+            logger.error("API connection error", exc_info=True)
+        except requests.HTTPError as e:
+            self.console.print(f"[red]HTTP error: {e.response.status_code}[/red]")
+            logger.error(f"API HTTP error: {e}", exc_info=True)
+        except Exception as e:
+            self.console.print(f"[red]Error: {str(e)}[/red]")
+            logger.error(f"API error: {e}", exc_info=True)
+        return None
+
+    def send_message(
+        self, prompt: str, files: Optional[List[Dict[str, str]]] = None
+    ) -> List[Any]:
+        """Send a message to the Gemini API and return the formatted response."""
+        url = self.BASE_URL.format(self.config.model_name)
+        params = {"key": self.config.api_key}
+
+        contents = [{"parts": [{"text": prompt}]}]
+        if files:
+            contents.extend([{"parts": [{"inline_data": file}]} for file in files])
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": self.config.temperature,
+                "topP": self.config.top_p,
+                "maxOutputTokens": self.config.max_output_tokens,
+            },
+        }
+
+        response_json = self.make_api_request(url, params, payload)
+        if not response_json or "candidates" not in response_json:
+            return []
+
+        text_response = response_json["candidates"][0]["content"]["parts"][0]["text"]
+
+        self.config.conversation_history.append({"role": "user", "content": prompt})
+        if files:
+            for file in files:
+                self.config.conversation_history.append(
+                    {"role": "user", "content": f"Uploaded file: {file.get('file_name', 'file')}"}
+                )
+        self.config.conversation_history.append(
+            {"role": "assistant", "content": text_response}
+        )
+
+        return render_rich_output(text_response, self.config.theme, self.console)
+
+
+class CommandHandler:
+    """Handles user commands."""
+
+    def __init__(self, config: Config, client: GeminiClient):
+        """Initialize the command handler."""
+        self.config = config
+        self.client = client
+        self.console = Console()
+        self.uploaded_file = None
+        self.commands = {
+            "help": self.show_help,
+            "config": self.show_config,
+            "history": self.show_history,
+            "clear": self.clear_history,
+            "save": self.save_conversation,
+            "load": self.load_conversation,
+            "system": self.handle_system_prompt,
+            "theme": self.change_theme,
+            "temp": self.change_temperature,
+            "top_p": self.change_top_p,
+            "max_tokens": self.change_max_tokens,
+            "upload": self.upload_file,
+            "pep8": self.toggle_pep8_format,
+            "exit": self.exit_cli,
+        }
+
+    def handle_command(self, command_str: str) -> bool:
+        """Handle a user command."""
+        parts = command_str.strip().split()
+        if not parts:
+            return False
+        command = parts[0].lower()
+        args = parts[1:]
+
+        if command in self.commands:
+            try:
+                return self.commands[command](*args)
+            except TypeError:
+                self.console.print(f"[red]Invalid arguments for command: /{command}[/red]")
+            except Exception as e:
+                self.console.print(f"[red]Error executing command /{command}: {e}[/red]")
+                logger.error(f"Command execution error: /{command}", exc_info=True)
+            return False
+        else:
+            self.console.print(f"[red]Unknown command: /{command}[/red]")
+            return False
+
+    def show_help(self) -> bool:
+        """Show help message with available commands."""
+        help_table = Table(title="Available Commands", show_header=False)
+        help_table.add_column("Command", style="cyan")
+        help_table.add_column("Description", style="green")
+
+        commands = {
+            "help": "Show this help message",
+            "config": "Show current configuration",
+            "history": "Show conversation history",
+            "clear": "Clear conversation history",
+            "save [filename]": "Save conversation to file",
+            "load [filename]": "Load conversation from file",
+            "system [prompt]": "Set/show system prompt",
+            "theme [name]": "Change syntax highlighting theme",
+            "temp [value]": "Set temperature (0-1)",
+            "top_p [value]": "Set top_p value (0-1)",
+            "max_tokens [n]": "Set max output tokens",
+            "upload [file]": "Upload a file for context",
+            "pep8": "Toggle PEP8 formatting",
+            "exit": "Exit the application",
+        }
+
+        for cmd, desc in commands.items():
+            help_table.add_row(f"/{cmd}", desc)
+
+        self.console.print(help_table)
+        return False
+
+    def show_config(self) -> bool:
+        """Show the current configuration."""
+        config_table = Table(title="Current Configuration")
+        config_table.add_column("Setting", style="cyan")
+        config_table.add_column("Value", style="green")
+
+        for key, value in self.config.__dict__.items():
+            if key == "api_key":
+                value = "********" if value else "Not set"
+            elif key == "conversation_history":
+                value = f"{len(value)} messages"
+            elif key == "history_file":
+                value = str(value)
+            config_table.add_row(key, str(value))
+
+
+        self.console.print(config_table)
+        return False
+
+    def show_history(self) -> bool:
+        """Show conversation history."""
+        if not self.config.conversation_history:
+            self.console.print("[yellow]No conversation history.[/yellow]")
+            return False
+
+        history_table = Table(title="Conversation History")
+        history_table.add_column("Role", style="cyan")
+        history_table.add_column("Content", style="green")
+
+        for entry in self.config.conversation_history[-10:]:
+            history_table.add_row(entry["role"], entry["content"])
+
+        self.console.print(history_table)
+        return False
+
+    def clear_history(self) -> bool:
+        """Clear conversation history."""
+        self.config.conversation_history = []
+        self.console.print("[green]Conversation history cleared.[/green]")
+        return False
+
+    def save_conversation(self, filename: Optional[str] = None) -> bool:
+        """Save the conversation history to a file."""
+        if not filename:
+            filename = f"conversation_{int(time.time())}.json"
+        try:
+            path = Path(filename)
+            with open(path, "w") as f:
+                json.dump(self.config.conversation_history, f, indent=2)
+            self.console.print(f"[green]Conversation saved to {path}[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Error saving conversation: {e}[/red]")
+        return False
+
+    def load_conversation(self, filename: Optional[str] = None) -> bool:
+        """Load conversation history from a file."""
+        if not filename:
+            self.console.print("[red]Please specify a filename to load.[/red]")
+            return False
+
+        path = Path(filename)
+        if not path.exists():
+            self.console.print(f"[red]File not found: {path}[/red]")
+            return False
+
+        try:
+            with open(path) as f:
+                self.config.conversation_history = json.load(f)
+            self.console.print(f"[green]Loaded conversation from {path}[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Error loading conversation: {e}[/red]")
+        return False
+
+    def handle_system_prompt(self, *args) -> bool:
+        """Set or show the system prompt."""
+        if args:
+            self.config.system_prompt = " ".join(args)
+            self.console.print("[green]System prompt updated.[/green]")
+        else:
+            if self.config.system_prompt:
+                self.console.print(Panel(self.config.system_prompt, title="System Prompt"))
+            else:
+                self.console.print("[yellow]No system prompt set.[/yellow]")
+        return False
+
+    def change_theme(self, theme_name: Optional[str] = None) -> bool:
+        """Change the syntax highlighting theme."""
+        if theme_name:
+            try:
+                # Test if the theme is valid
+                Syntax("test", lexer="python", theme=theme_name)
+                self.config.theme = theme_name
+                self.console.print(f"[green]Theme changed to {theme_name}[/green]")
+            except Exception:
+                self.console.print("[red]Invalid theme name[/red]")
+        else:
+            themes = sorted(Syntax.get_all_styles())
+            self.console.print(Panel("\n".join(themes), title="Available Themes"))
+        return False
+
+    def change_temperature(self, value: Optional[str] = None) -> bool:
+        """Change the temperature setting."""
+        if value:
+            try:
+                temp = float(value)
+                if 0 <= temp <= 1:
+                    self.config.temperature = temp
+                    self.console.print(f"[green]Temperature set to {temp}[/green]")
+                else:
+                    self.console.print("[red]Temperature must be between 0 and 1[/red]")
+            except ValueError:
+                self.console.print("[red]Invalid temperature value[/red]")
+        else:
+            self.console.print(f"Current temperature: {self.config.temperature}")
+        return False
+
+    def change_top_p(self, value: Optional[str] = None) -> bool:
+        """Change the top-p setting."""
+        if value:
+            try:
+                top_p = float(value)
+                if 0 <= top_p <= 1:
+                    self.config.top_p = top_p
+                    self.console.print(f"[green]Top-p set to {top_p}[/green]")
+                else:
+                    self.console.print("[red]Top-p must be between 0 and 1[/red]")
+            except ValueError:
+                self.console.print("[red]Invalid top-p value[/red]")
+        else:
+            self.console.print(f"Current top-p: {self.config.top_p}")
+        return False
+
+    def change_max_tokens(self, value: Optional[str] = None) -> bool:
+        """Change the max_tokens setting."""
+        if value:
+            try:
+                tokens = int(value)
+                if tokens > 0:
+                    self.config.max_output_tokens = tokens
+                    self.console.print(f"[green]Max tokens set to {tokens}[/green]")
+                else:
+                    self.console.print("[red]Max tokens must be positive[/red]")
+            except ValueError:
+                self.console.print("[red]Invalid token value[/red]")
+        else:
+            self.console.print(f"Current max tokens: {self.config.max_output_tokens}")
+        return False
+
+    def upload_file(self, filepath: Optional[str] = None) -> bool:
+        """Upload a file for context."""
+        if not filepath:
+            self.console.print("[red]Please specify a file to upload[/red]")
+            return False
+
+        path = Path(filepath)
+        if not path.exists():
+            self.console.print(f"[red]File not found: {path}[/red]")
+            return False
+
+        file_data = get_file_content_and_mime(path)
+        if file_data:
+            self.uploaded_file = file_data
+            self.console.print(f"[green]File {path.name} ready for next message[/green]")
+        return False
+
+    def toggle_pep8_format(self) -> bool:
+        """Toggle PEP8 formatting for code blocks."""
+        self.config.pep8_format = not self.config.pep8_format
+        status = "enabled" if self.config.pep8_format else "disabled"
+        self.console.print(f"[green]PEP8 formatting {status}[/green]")
+        return False
+
+    def exit_cli(self) -> bool:
+        """Exit the CLI application."""
+        if self.config.auto_save:
+            self.save_conversation()  # Save conversation on exit
+        self.console.print("[yellow]Goodbye![/yellow]")
+        return True
+
+
+def main():
+    """Main function for the Gemini AI CLI."""
+    parser = argparse.ArgumentParser(description="Gemini AI CLI")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("~/.config/gemini/config.yaml").expanduser(),
+        help="Path to configuration file",
+    )
+    args = parser.parse_args()
+
+    config = Config.load(args.config)
+    if not config.api_key:
+        print("[red]No API key found. Please set GEMINI_API_KEY environment variable or configure it in config.yaml[/red]")
+        sys.exit(1)
+
+    client = GeminiClient(config)
+    handler = CommandHandler(config, client)
+    console = Console()
+
+    session = PromptSession(
+        history=FileHistory(str(config.history_file)),
+        auto_suggest=AutoSuggestFromHistory() if config.auto_complete else None,
+        completer=WordCompleter([f"/{cmd}" for cmd in handler.commands.keys()])
+        if config.auto_complete else None,
+    )
+
+    console.print("[bold blue]Welcome to Gemini AI CLI![/bold blue]")
+    console.print("Type /help for available commands.")
+
+    while True:
+        try:
+            user_input = session.prompt(
+                HTML("<ansiyellow>gemini></ansiyellow> "),
+            ).strip()
+
+            if not user_input:
+                continue
+
+            if user_input.startswith("/"):
+                if handler.handle_command(user_input[1:]):
+                    break
+                continue
+
+            files = [handler.uploaded_file] if handler.uploaded_file else None
+            handler.uploaded_file = None  # Reset after use
+
+            response = client.send_message(user_input, files)
+            if response:
+                for part in response:
+                    console.print(part)
+
+            if config.auto_save:
+                config.truncate_history_file()  # Truncate on each interaction
+
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
+            break
+        except Exception as e:
+            logger.error("Unexpected error", exc_info=True)
+            console.print(f"[red]Error: {e}[/red]")
+
+    config.save(args.config)
+
+
+if __name__ == "__main__":
+    main()
