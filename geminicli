@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+
+"""
+[bold bright_cyan]✨ Gemini AI CLI - Termux Edition ✨[/bold bright_cyan]
+[dim]Harnessing the arcane wisdom of Large Language Models in your terminal.[/dim]
+Version: 2.5.0 - Mystical Neon with Advanced Features
+Author: Pyrmethus, the Termux Coding Wizard (Enhanced by Grok 3)
+Date: 2025-03-12
+"""
+
+import os
+import sys
+import asyncio
+import time
+from pathlib import Path
+from typing import Optional
+import yaml
+import argparse
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.theme import Theme
+from prompt_toolkit import PromptSession, HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+import aiohttp
+from tenacity import retry, stop_after_attempt, wait_exponential
+from datetime import datetime
+
+# Constants - Whispers of the Digital Gods
+CONFIG_DIR = Path.home() / ".config" / "gemini"
+CONFIG_FILE = CONFIG_DIR / "config.yaml"
+HISTORY_FILE = CONFIG_DIR / "history"
+SESSIONS_DIR = CONFIG_DIR / "sessions"
+
+SUPPORTED_MODELS = [
+    "gemini-1.0-pro",
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-latest",
+    "gemini-2.0-pro",
+]
+
+THEMES = {
+    "neon_cyan": {"neon": "bright_cyan", "prompt": "bright_magenta"},
+    "neon_green": {"neon": "bright_green", "prompt": "bright_yellow"},
+    "dark_mystic": {"neon": "bright_white", "prompt": "bright_red"},
+}
+
+# Define a mystical neon theme for Rich
+def get_theme(colors):
+    return Theme({
+        "neon": colors["neon"],
+        "neon_error": "bold bright_red",
+        "neon_success": "bold bright_green",
+        "neon_warning": "bold bright_yellow",
+        "prompt": colors["prompt"],
+        "markdown": "bright_white",
+        "panel.border": colors["neon"],
+        "rule.line": colors["neon"],
+    })
+
+class GeminiConfig:
+    """**🔮 Configuration Alchemist 🔮** - Transmuting settings for optimal incantation."""
+    def __init__(self):
+        self.config_file = CONFIG_FILE
+        self.config = self.load_config()
+
+    def load_config(self) -> dict:
+        """Summoning configuration from the **ether** or conjuring defaults."""
+        default_config = {
+            "model": "gemini-1.5-pro",
+            "api_key": os.getenv("GEMINI_API_KEY", ""),
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "system_prompt": "You are a wise and helpful spirit, guiding the user with knowledge and clarity.",
+            "neon_color": "bright_cyan",
+            "prompt_color": "bright_magenta",
+            "aliases": {},
+            "theme": "neon_cyan",
+        }
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, "r") as f:
+                    loaded_config = yaml.safe_load(f) or {}
+                    default_config.update(loaded_config)
+            except Exception as e:
+                print(f"[neon_error]Error loading config:[/neon_error] {e}")
+        return default_config
+
+    def save_config(self):
+        """Binding the current configuration to the **sacred texts** (config file)."""
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file, "w") as f:
+            yaml.dump(self.config, f)
+
+class GeminiAPI:
+    """**🌌 API Navigator 🌌** - Charting courses through the celestial data streams of Gemini AI."""
+    def __init__(self, config: GeminiConfig):
+        self.config = config
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def setup(self):
+        """Opening the **ethereal gateway** for API communication."""
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+
+    async def cleanup(self):
+        """Closing the **ethereal gateway**, tidying up the digital threads."""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def generate_content(self, prompt: str, system_prompt: str) -> tuple[str, int]:
+        """**Conjuring** content from the Gemini AI oracle, returning text and token count."""
+        if not self.session:
+            await self.setup()
+        url = f"{self.base_url}/{self.config.config['model']}:generateContent"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "systemInstruction": {"role": "system", "parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": self.config.config["temperature"],
+                "maxOutputTokens": self.config.config["max_tokens"],
+            }
+        }
+        params = {"key": self.config.config["api_key"]}
+        try:
+            start_time = time.time()
+            async with self.session.post(url, json=data, headers=headers, params=params) as response:
+                response.raise_for_status()
+                result = await response.json()
+                text = result["candidates"][0]["content"]["parts"][0]["text"]
+                tokens = len(text.split())  # Simplified token estimation
+                response_time = time.time() - start_time
+                return text, tokens, response_time
+        except Exception as e:
+            raise Exception(f"API Error: {e}")
+
+    async def suggest_completion(self, partial_prompt: str) -> list[str]:
+        """Suggest completions for a partial prompt."""
+        prompt = f"Provide 3 short completions for this prompt: '{partial_prompt}'"
+        text, _, _ = await self.generate_content(prompt, self.system_prompt)
+        return [line.strip() for line in text.split("\n") if line.strip()][:3]
+
+class GeminiCLI:
+    """**🔮 Gemini CLI - The Mystical Terminal Interface 🔮**"""
+    def __init__(self, interactive=True):
+        self.config = GeminiConfig()
+        self.api = GeminiAPI(self.config)
+        colors = THEMES.get(self.config.config["theme"], THEMES["neon_cyan"])
+        self.console = Console(theme=get_theme(colors))
+        self.neon_color = colors["neon"]
+        prompt_color = colors["prompt"]
+        message = HTML(f'<ansi{prompt_color}>gemini> </ansi{prompt_color}>')
+        self.session = PromptSession(
+            message=message,
+            history=FileHistory(str(HISTORY_FILE)),
+            auto_suggest=AutoSuggestFromHistory()
+        )
+        self.system_prompt = self.config.config["system_prompt"]
+        self.interaction_history = []
+        self.interactive = interactive
+        if interactive:
+            self.show_welcome()
+
+    def show_welcome(self):
+        """Displaying the **welcome incantation** with mystical neon styling."""
+        welcome_text = f"""
+[neon]✨ Gemini AI CLI - Termux Edition ✨[/neon]
+[dim]Harnessing the arcane wisdom of Large Language Models in your terminal.[/dim]
+[neon]Version:[/neon] 2.5.0 - Mystical Neon with Advanced Features
+[neon]Author:[/neon] Pyrmethus, the Termux Coding Wizard (Enhanced by Grok 3)
+[neon]Date:[/neon] 2025-03-12
+[neon]Model:[/neon] {self.config.config['model']}
+[neon]Theme:[/neon] {self.config.config['theme']}
+[neon]Type[/neon] [prompt]/help[/prompt] [neon]for command spells.[/neon]
+"""
+        self.console.print(Panel(welcome_text, border_style=self.neon_color, title="[neon]🔮 Welcome, Seeker! 🔮[/neon]"))
+
+    async def handle_command(self, command: str) -> bool:
+        """Processing user commands - casting digital spells."""
+        cmd = command.strip()
+        parts = cmd.split()
+        cmd_lower = cmd.lower()
+
+        if cmd_lower == "/help":
+            self.show_help()
+        elif cmd_lower.startswith("/system "):
+            self.system_prompt = cmd[8:].strip()
+            self.config.config["system_prompt"] = self.system_prompt
+            self.config.save_config()
+            self.console.print("[neon_success]System prompt updated.[/neon_success]")
+        elif cmd_lower.startswith("/model "):
+            model_name = parts[1]
+            if model_name in SUPPORTED_MODELS:
+                self.config.config["model"] = model_name
+                self.config.save_config()
+                self.api = GeminiAPI(self.config)
+                self.console.print(f"[neon_success]Model changed to {model_name}.[/neon_success]")
+            else:
+                self.console.print(f"[neon_error]Invalid model. Supported: {', '.join(SUPPORTED_MODELS)}[/neon_error]")
+        elif cmd_lower.startswith("/temperature "):
+            try:
+                temp = float(parts[1])
+                if 0 <= temp <= 1:
+                    self.config.config["temperature"] = temp
+                    self.config.save_config()
+                    self.console.print(f"[neon_success]Temperature set to {temp}.[/neon_success]")
+                else:
+                    self.console.print("[neon_error]Temperature must be between 0 and 1.[/neon_error]")
+            except ValueError:
+                self.console.print("[neon_error]Invalid temperature value.[/neon_error]")
+        elif cmd_lower.startswith("/max_tokens "):
+            try:
+                tokens = int(parts[1])
+                if tokens > 0:
+                    self.config.config["max_tokens"] = tokens
+                    self.config.save_config()
+                    self.console.print(f"[neon_success]Max tokens set to {tokens}.[/neon_success]")
+                else:
+                    self.console.print("[neon_error]Max tokens must be positive.[/neon_error]")
+            except ValueError:
+                self.console.print("[neon_error]Invalid max tokens value.[/neon_error]")
+        elif cmd_lower.startswith("/export_history "):
+            filename = parts[1]
+            try:
+                with open(filename, "w") as f:
+                    yaml.dump(self.interaction_history, f)
+                self.console.print(f"[neon_success]History exported to {filename}.[/neon_success]")
+            except Exception as e:
+                self.console.print(f"[neon_error]Error exporting history: {e}[/neon_error]")
+        elif cmd_lower.startswith("/save_session "):
+            session_name = parts[1]
+            session_file = SESSIONS_DIR / f"{session_name}.yaml"
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(session_file, "w") as f:
+                yaml.dump(self.config.config, f)
+            self.console.print(f"[neon_success]Session '{session_name}' saved.[/neon_success]")
+        elif cmd_lower.startswith("/load_session "):
+            session_name = parts[1]
+            session_file = SESSIONS_DIR / f"{session_name}.yaml"
+            if session_file.exists():
+                with open(session_file, "r") as f:
+                    self.config.config = yaml.safe_load(f)
+                self.api = GeminiAPI(self.config)
+                self.update_theme()
+                self.system_prompt = self.config.config["system_prompt"]
+                self.console.print(f"[neon_success]Session '{session_name}' loaded.[/neon_success]")
+            else:
+                self.console.print(f"[neon_error]Session '{session_name}' not found.[/neon_error]")
+        elif cmd_lower.startswith("/show_history"):
+            n = 5 if len(parts) == 1 else int(parts[1])
+            history_to_show = self.interaction_history[-n:]
+            for interaction in history_to_show:
+                self.console.print(f"[neon]Timestamp:[/neon] {interaction['timestamp']}\n[neon]User:[/neon] {interaction['user_prompt']}\n[neon]AI:[/neon] {interaction['ai_response']}\n")
+        elif cmd_lower == "/clear_history":
+            self.interaction_history.clear()
+            self.console.print("[neon_success]Interaction history cleared.[/neon_success]")
+        elif cmd_lower.startswith("/alias "):
+            if len(parts) >= 3:
+                alias_name, *alias_cmd = parts[1], " ".join(parts[2:])
+                self.config.config["aliases"][alias_name] = alias_cmd
+                self.config.save_config()
+                self.console.print(f"[neon_success]Alias '{alias_name}' set to '{alias_cmd}'.[/neon_success]")
+            else:
+                self.console.print("[neon_error]Usage: /alias [name] [command][/neon_error]")
+        elif cmd_lower.startswith("/unalias "):
+            alias_name = parts[1]
+            if alias_name in self.config.config["aliases"]:
+                del self.config.config["aliases"][alias_name]
+                self.config.save_config()
+                self.console.print(f"[neon_success]Alias '{alias_name}' removed.[/neon_success]")
+            else:
+                self.console.print(f"[neon_error]Alias '{alias_name}' not found.[/neon_error]")
+        elif cmd_lower.startswith("/show_aliases"):
+            if self.config.config["aliases"]:
+                for name, cmd in self.config.config["aliases"].items():
+                    self.console.print(f"[neon]{name}:[/neon] {cmd}")
+            else:
+                self.console.print("[neon]No aliases defined.[/neon]")
+        elif cmd_lower.startswith("/suggest "):
+            partial = " ".join(parts[1:])
+            suggestions = await self.api.suggest_completion(partial)
+            self.console.print("[neon]Suggestions:[/neon]")
+            for i, suggestion in enumerate(suggestions, 1):
+                self.console.print(f"{i}. {suggestion}")
+        elif cmd_lower.startswith("/theme "):
+            theme_name = parts[1]
+            if theme_name in THEMES:
+                self.config.config["theme"] = theme_name
+                self.config.save_config()
+                self.update_theme()
+                self.console.print(f"[neon_success]Theme switched to '{theme_name}'.[/neon_success]")
+            else:
+                self.console.print(f"[neon_error]Invalid theme. Supported: {', '.join(THEMES.keys())}[/neon_error]")
+        elif cmd_lower == "/exit":
+            return False
+        elif cmd_lower in self.config.config["aliases"]:
+            await self.handle_command(self.config.config["aliases"][cmd_lower])
+        else:
+            await self.generate_response(cmd)
+        return True
+
+    def update_theme(self):
+        """Update the console theme and prompt based on the current configuration."""
+        colors = THEMES.get(self.config.config["theme"], THEMES["neon_cyan"])
+        self.console = Console(theme=get_theme(colors))
+        self.neon_color = colors["neon"]
+        prompt_color = colors["prompt"]
+        self.session = PromptSession(
+            message=HTML(f'<ansi{prompt_color}>gemini> </ansi{prompt_color}>'),
+            history=FileHistory(str(HISTORY_FILE)),
+            auto_suggest=AutoSuggestFromHistory()
+        )
+
+    def show_help(self):
+        """Displaying the **scroll of commands** with neon styling."""
+        help_text = f"""
+[neon]✨ Available Command Spells ✨[/neon]
+
+[prompt]/help[/prompt]              - Reveal this ancient scroll of commands.
+[prompt]/system [msg][/prompt]      - Alter the system prompt.
+[prompt]/model [model_name][/prompt] - Switch to a different Gemini model.
+[prompt]/temperature [value][/prompt] - Adjust creativity (0-1).
+[prompt]/max_tokens [value][/prompt] - Set max response length.
+[prompt]/show_history [n][/prompt]  - Show last n interactions (default 5).
+[prompt]/clear_history[/prompt]     - Clear interaction history.
+[prompt]/export_history [file][/prompt] - Export history to a YAML file.
+[prompt]/save_session [name][/prompt] - Save current config as a session.
+[prompt]/load_session [name][/prompt] - Load a saved session config.
+[prompt]/alias [name] [cmd][/prompt] - Create/edit an alias.
+[prompt]/unalias [name][/prompt]    - Remove an alias.
+[prompt]/show_aliases[/prompt]      - List all aliases.
+[prompt]/suggest [text][/prompt]    - Get prompt completion suggestions.
+[prompt]/theme [name][/prompt]      - Switch to a predefined theme.
+[prompt]/exit[/prompt]              - Disengage from the Gemini realm.
+"""
+        self.console.print(Panel(help_text, title="[neon]📜 Command Codex 📜[/neon]", border_style=self.neon_color))
+
+    async def generate_response(self, prompt: str):
+        """**Evoking** and displaying the AI's response with performance metrics."""
+        try:
+            text, tokens, response_time = await self.api.generate_content(prompt, self.system_prompt)
+            self.interaction_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "user_prompt": prompt,
+                "ai_response": text
+            })
+            self.console.print(Panel(Markdown(text), border_style=self.neon_color, title="[neon]🔮 Gemini Speaks 🔮[/neon]"))
+            self.console.print(f"[neon]Metrics:[/neon] Tokens: {tokens}, Time: {response_time:.2f}s")
+        except Exception as e:
+            self.console.print(f"[neon_error]Error:[/neon_error] {e}")
+
+    async def run(self):
+        """Initiating the interactive CLI loop - entering the Gemini realm."""
+        try:
+            while True:
+                try:
+                    user_input = await self.session.prompt_async()
+                    if user_input.strip() and not await self.handle_command(user_input):
+                        break
+                except KeyboardInterrupt:
+                    continue
+                except EOFError:
+                    break
+        finally:
+            await self.api.cleanup()
+            self.console.print("[neon]✨ Farewell, Seeker! ✨[/neon]")
+
+async def main():
+    """**Entry point** - where the magic begins."""
+    parser = argparse.ArgumentParser(description="Gemini AI CLI - Mystical Neon Edition")
+    parser.add_argument("--file", help="Path to a text file for batch processing.")
+    args = parser.parse_args()
+    cli = GeminiCLI(interactive=not args.file)
+    await cli.api.setup()
+    if args.file:
+        with open(args.file, "r") as f:
+            await cli.generate_response(f.read())
+        await cli.api.cleanup()
+    else:
+        await cli.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
