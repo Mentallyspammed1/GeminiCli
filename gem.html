@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pyrmethus Chat</title>
+  <style>
+    :root {
+      --bg-dark: #1a1a2e;
+      --neon-pink: #ff007f;
+      --neon-cyan: #00ddeb;
+      --neon-green: #39ff14;
+      --text-light: #e0e0e0;
+      --shadow-glow: 0 0 10px rgba(255, 0, 127, 0.7);
+      --shadow-cyan: 0 0 10px rgba(0, 221, 235, 0.7);
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Courier New', monospace;
+      background-color: var(--bg-dark);
+      color: var(--text-light);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+      position: relative;
+    }
+    .chat-container {
+      width: 90%;
+      max-width: 800px;
+      height: 80vh;
+      background: rgba(30, 30, 50, 0.9);
+      border: 2px solid var(--neon-cyan);
+      border-radius: 10px;
+      box-shadow: var(--shadow-glow), inset 0 0 20px rgba(0, 221, 235, 0.3);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+      z-index: 1;
+    }
+    .chat-header {
+      background: linear-gradient(45deg, var(--neon-pink), var(--neon-cyan));
+      padding: 15px;
+      text-align: center;
+      font-size: 1.5em;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--bg-dark);
+      text-shadow: 0 0 5px var(--neon-green);
+      position: relative;
+    }
+    .clear-btn {
+      position: absolute;
+      right: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      padding: 5px 10px;
+      background: var(--neon-green);
+      color: var(--bg-dark);
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.9em;
+      transition: box-shadow 0.3s, transform 0.2s;
+    }
+    .clear-btn:hover {
+      box-shadow: 0 0 15px var(--neon-green);
+      transform: translateY(-50%) scale(1.05);
+    }
+    .chat-area {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background: rgba(20, 20, 40, 0.8);
+    }
+    .message {
+      margin: 10px 0;
+      padding: 10px 15px;
+      border-radius: 5px;
+      max-width: 70%;
+      word-wrap: break-word;
+      position: relative;
+    }
+    .user-message {
+      background: var(--neon-pink);
+      color: var(--bg-dark);
+      margin-left: auto;
+      text-align: right;
+      box-shadow: var(--shadow-glow);
+    }
+    .bot-message {
+      background: var(--neon-cyan);
+      color: var(--bg-dark);
+      margin-right: auto;
+      box-shadow: var(--shadow-cyan);
+    }
+    .timestamp {
+      font-size: 0.7em;
+      color: rgba(224, 224, 224, 0.6);
+      margin-top: 5px;
+      text-align: inherit;
+    }
+    .typing-indicator {
+      display: flex;
+      gap: 5px;
+      margin: 10px 0;
+    }
+    .typing-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--neon-cyan);
+      border-radius: 50%;
+      animation: pulse 1.5s infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 1; }
+    }
+    .input-area {
+      display: flex;
+      padding: 15px;
+      background: rgba(30, 30, 50, 0.95);
+      border-top: 1px solid var(--neon-green);
+    }
+    .chat-input {
+      flex: 1;
+      padding: 10px;
+      border: 2px solid var(--neon-green);
+      border-radius: 5px 0 0 5px;
+      background: var(--bg-dark);
+      color: var(--text-light);
+      font-size: 1em;
+      outline: none;
+      transition: box-shadow 0.3s;
+    }
+    .chat-input:focus {
+      box-shadow: 0 0 15px var(--neon-green);
+    }
+    .send-btn {
+      padding: 10px 20px;
+      border: none;
+      background: var(--neon-green);
+      color: var(--bg-dark);
+      font-weight: bold;
+      border-radius: 0 5px 5px 0;
+      cursor: pointer;
+      transition: box-shadow 0.3s, transform 0.2s, opacity 0.3s;
+    }
+    .send-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .send-btn:not(:disabled):hover {
+      box-shadow: 0 0 15px var(--neon-green);
+      transform: scale(1.05);
+    }
+    .chat-area::-webkit-scrollbar {
+      width: 8px;
+    }
+    .chat-area::-webkit-scrollbar-thumb {
+      background: var(--neon-cyan);
+      border-radius: 4px;
+    }
+    .chat-area::-webkit-scrollbar-track {
+      background: var(--bg-dark);
+    }
+    body::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(45deg, var(--neon-pink), var(--neon-cyan), var(--neon-green));
+      opacity: 0.1;
+      animation: neonPulse 15s ease infinite;
+      z-index: -1;
+    }
+    @keyframes neonPulse {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="chat-container" role="main" aria-label="Pyrmethus Chat Interface">
+    <div class="chat-header">
+      Pyrmethus Chat
+      <button class="clear-btn" aria-label="Clear chat history">Clear</button>
+    </div>
+    <div class="chat-area" role="log" aria-live="polite"></div>
+    <div class="input-area">
+      <input type="text" class="chat-input" placeholder="Type your message..." aria-label="Chat input" autocomplete="off">
+      <button class="send-btn" aria-label="Send message">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const chatArea = document.querySelector('.chat-area');
+    const chatInput = document.querySelector('.chat-input');
+    const sendBtn = document.querySelector('.send-btn');
+    const clearBtn = document.querySelector('.clear-btn');
+    const storageKey = 'pyrmethusChatHistory';
+
+    // Replace with your actual Gemini API key from https://ai.google.dev/gemini-api/docs/api-key
+    const GEMINI_API_KEY = "AIzaSyD0U2m-afkV14nK_CQB2ftyLtam8ZwMOdE";
+    const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + GEMINI_API_KEY;
+
+    // Load chat history from localStorage
+    function loadChatHistory() {
+      const saved = localStorage.getItem(storageKey);
+      return saved ? JSON.parse(saved) : [
+        { role: 'bot', content: 'Greetings, seeker! I am Pyrmethus, powered by Gemini AI.', timestamp: new Date().toISOString() }
+      ];
+    }
+
+    // Save chat history to localStorage
+    function saveChatHistory(history) {
+      localStorage.setItem(storageKey, JSON.stringify(history));
+    }
+
+    // Render a single message
+    function renderMessage({ role, content, timestamp }) {
+      const messageDiv = document.createElement('div');
+      messageDiv.classList.add('message', role === 'user' ? 'user-message' : 'bot-message');
+      messageDiv.innerHTML = `
+        ${content}
+        <div class="timestamp">${new Date(timestamp).toLocaleTimeString()}</div>
+      `;
+      chatArea.appendChild(messageDiv);
+      scrollToBottom();
+    }
+
+    // Scroll chat area to the bottom
+    function scrollToBottom() {
+      chatArea.scrollTo({ top: chatArea.scrollHeight, behavior: 'smooth' });
+    }
+
+    // Show typing indicator
+    function showTypingIndicator() {
+      const indicator = document.createElement('div');
+      indicator.classList.add('typing-indicator');
+      indicator.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+      chatArea.appendChild(indicator);
+      scrollToBottom();
+      return indicator;
+    }
+
+    // Remove typing indicator
+    function removeTypingIndicator(indicator) {
+      if (indicator) indicator.remove();
+    }
+
+    // Fetch response from Gemini API
+    async function getBotResponse(userMessage) {
+      const typingIndicator = showTypingIndicator();
+      try {
+        const response = await fetch(GEMINI_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            contents: [
+              { parts: [ { text: userMessage } ] }
+            ]
+          })
+        });
+        if (!response.ok) throw new Error(`API error: ${response.status}`);
+        const data = await response.json();
+        // Adjust this line if the API response structure changes
+        const botResponse = data.candidates[0].content.parts[0].text;
+        return botResponse;
+      } catch (error) {
+        console.error('Gemini API Error:', error);
+        return 'The neon void whispers: An error occurred. Check your API key or try again.';
+      } finally {
+        removeTypingIndicator(typingIndicator);
+      }
+    }
+
+    // Handle sending a message
+    async function sendMessage() {
+      const message = chatInput.value.trim();
+      if (!message) return;
+
+      sendBtn.disabled = true;
+      const userMsg = { role: 'user', content: message, timestamp: new Date().toISOString() };
+      chatHistory.push(userMsg);
+      renderMessage(userMsg);
+      chatInput.value = '';
+      saveChatHistory(chatHistory);
+
+      const botResponse = await getBotResponse(message);
+      const botMsg = { role: 'bot', content: botResponse, timestamp: new Date().toISOString() };
+      chatHistory.push(botMsg);
+      renderMessage(botMsg);
+      saveChatHistory(chatHistory);
+      sendBtn.disabled = false;
+      chatInput.focus();
+    }
+
+    // Clear chat history and re-render
+    function clearChat() {
+      chatHistory = [
+        { role: 'bot', content: 'Chat cleared. The neon void awaits your words.', timestamp: new Date().toISOString() }
+      ];
+      chatArea.innerHTML = '';
+      saveChatHistory(chatHistory);
+      renderChatHistory();
+    }
+
+    // Render full chat history
+    function renderChatHistory() {
+      chatArea.innerHTML = '';
+      chatHistory.forEach(renderMessage);
+    }
+
+    // Initialize chat history and render
+    let chatHistory = loadChatHistory();
+    renderChatHistory();
+
+    // Event listeners
+    sendBtn.addEventListener('click', sendMessage);
+    chatInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter' && !sendBtn.disabled) sendMessage();
+    });
+    clearBtn.addEventListener('click', clearChat);
+    chatInput.addEventListener('input', () => {
+      sendBtn.disabled = !chatInput.value.trim();
+    });
+
+    // Warn if API key is not replaced
+    if (GEMINI_API_KEY === "YOUR_API_KEY_HERE") {
+      const warningMsg = { role: 'bot', content: 'Warning: Replace "YOUR_API_KEY_HERE" with your Gemini API key from ai.google.dev.', timestamp: new Date().toISOString() };
+      chatHistory.push(warningMsg);
+      renderMessage(warningMsg);
+      saveChatHistory(chatHistory);
+    }
+  </script>
+</body>
+</html>
